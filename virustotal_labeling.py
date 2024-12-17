@@ -1,102 +1,70 @@
-import json
-import urllib
-import sys
 import os
 import time
-import re
 import hashlib
+import requests
 
-_md5 = '[a-z0-9]{32}'
+API_KEY = '-'
+BASE_URL = 'https://www.virustotal.com/api/v3/'
 
 path_dir = './malware_samples'
-file_list = os.listdir(path_dir)
 
-md5_pattern = re.compile(_md5)
+headers = {
+    'x-apikey': API_KEY
+}
 
-class vtAPI():
-	def __init__(self):
-		self.api = '-'
-		self.base = 'https://www.virustotal.com/vtapi/v2/'
-	
-	def getReport(self,md5):
-		param = {'resource':md5,'apikey':self.api,'allinfo': '1'}
-		url = self.base + "file/report"
-		data = urllib.urlencode(param)
-		result = urllib.urlopen(url,data)
-		
-		jdata = json.loads(result.read())
+def calculate_md5(file_path):
+    hash_md5 = hashlib.md5()
+    with open(file_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
 
-		if jdata['response_code'] == 0:
-			print(md5 + " -- Not Found in VT")
-			return "no"
-		else:
-			print("=== Results for MD5: ", jdata['md5'], "\tDetected by: ", jdata['positives'])
-			return jdata['positives']
+def get_report(file_hash):
+    url = f"{BASE_URL}files/{file_hash}"
+    response = requests.get(url, headers=headers)
+    return response.json()
 
+def req_scan(file_path):
+    url = f"{BASE_URL}files"
+    with open(file_path, 'rb') as f:
+        files = {'file': f}
+        response = requests.post(url, headers=headers, files=files)
+    return response.json()
 
-	def reqScan(self,filepath):
-		print("- Requesting a new scan")
-		param = {'file':filepath,'apikey':self.api}
-		url = self.base + "file/scan"
-		data = urllib.urlencode(param)
-		result = urllib.urlopen(url,data)
-		
-		jdata = json.loads(result.read())
-		
-		return jdata
+def scan_files_in_directory(path_dir):
+    for filename in os.listdir(path_dir):
+        file_path = os.path.join(path_dir, filename)
 
-	def getMd5(self, filepath, blocksize=8192):
-	    md5 = hashlib.md5()
-	    try:
-	        f = open(filepath, "rb")
-	    except IOError as e:
-	        print("file open error", e)
-	        return
-	    while True:
-	        buf = f.read(blocksize)
-	        if not buf:
-	            break
-	        md5.update(buf)
-	    return md5.hexdigest()
+        if not os.path.isfile(file_path):
+            continue
 
+        if len(filename) != 32 or not all(c in '0123456789abcdef' for c in filename.lower()):
+            md5_hash = calculate_md5(file_path)
+        else:
+            md5_hash = filename
+        
+        print(f"Scanning: {file_path} (MD5: {md5_hash})")
+        
+        report = get_report(md5_hash)
+        
+        if 'data' not in report:
+            print("No analysis result found. Requesting scan.")
+            req_scan(file_path)
+            time.sleep(20)
 
-def main():
+            report = get_report(md5_hash)
+        
+        if 'data' in report:
+            detected_count = sum(1 for engine in report['data']['attributes']['last_analysis_results'].values() if engine['category'] == 'malicious')
+            print(f"Detected by {detected_count} antivirus engines.")
 
-	vt = vtAPI()
-	i = 0
+            new_filename = f"{detected_count}#{md5_hash}"
+            new_file_path = os.path.join(path_dir, new_filename)
 
-	for file in file_list:
+            os.rename(file_path, new_file_path)
+            print(f"Renamed file to: {new_filename}")
 
-		before = path_dir + "/" + file
-		name_check = re.search(md5_pattern, file)
-
-		if name_check == None:
-			file = vt.getMd5(before)
-
-		try:
-			i += 1
-			rns = vt.getReport(file)
-			if(rns == "no"):
-				file_path = os.getcwd() + "/" + file
-				rns = vt.reqScan(file_path)
-				file = rns['md5']
-
-				while True:
-					time.sleep(20)
-					rns = vt.getReport(file)
-					if(rns != "no"):
-						break
-				
-			after = path_dir + "/" + str(rns) + "#" + file
-
-			print("Processed " + str(i) + " files - "+ after)
-			os.rename(before, after)
-
-			time.sleep(15)
-		except:
-			pass
-
-	
+        time.sleep(15)
 
 if __name__ == '__main__':
-	main()
+    scan_files_in_directory(path_dir)
